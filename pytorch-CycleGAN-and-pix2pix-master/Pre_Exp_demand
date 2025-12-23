@@ -1,0 +1,46 @@
+
+ HSI(300) to jpg(3)
+python train.py --dataroot ./datasets/cyclegan_dataset_HSI --name pathology_staining_cyclegan_clean --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0 --use_wandb
+python test_metrics.py --dataroot ./datasets/cyclegan_dataset_HSI --name pathology_staining_cyclegan_clean --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results//pathology_staining_cyclegan_clean/fid_fake_B ./results/pathology_staining_cyclegan/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+ RGB to RGB
+
+python test_metrics.py --dataroot ./datasets/W2HE --name your_old_jpg_model_name --model cycle_gan --dataset_mode unaligned --netG resnet_9blocks --preprocess none --phase test --input_nc 3 --output_nc 3
+python -m pytorch_fid ./results//W2HE_cyclegan/fid_fake_B ./results/W2HE_cyclegan/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+
+HSI to HSI
+python train.py --dataroot ./datasets/HSIToHSI_data --name HSI2HSI --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 300 --netG resnet_9blocks --preprocess crop --crop_size 256 --lambda_identity 0.5 --use_wandb
+python test_metrics.py --dataroot ./datasets/HSIToHSI_data --name HSI2HSI --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --preprocess none --phase test --input_nc 300 --output_nc 300
+python -m pytorch_fid ./results//HSI2HSI/fid_fake_B ./results//HSI2HSI/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG(3)
+python train.py --dataroot ./datasets/cyclegan_dataset_HSI2png --name HSI2png --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0 --use_wandb
+python test_metrics.py --dataroot ./datasets/cyclegan_dataset_HSI2png --name HSI2png --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results/HSI2png/fid_fake_B ./results/HSI2png/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG_16bit(3)
+python train.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_16bit --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0 --use_wandb
+python test_metrics.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_16bit --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results/HSI2png_16bit/fid_fake_B ./results/HSI2png_16bit/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+
+HSI(300) to PNG_16bit(3) 300 to 256
+python train.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_16bit_ngf256 --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --ngf 256 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0 --use_wandb
+python test_metrics.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_16bit_ngf256 --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --ngf 256 --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results//HSI2png_16bit_ngf256/fid_fake_B ./results//HSI2png_16bit_ngf256/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG_16bit(3) 300 to 128
+python train.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_SE_Res12_ngf128 --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_12blocks_se --preprocess crop --crop_size 256 --ngf 128 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0 --use_wandb
+python test_metrics.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_SE_Res12_ngf128 --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_12blocks_se --ngf 128 --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results///HSI2png_SE_Res12_ngf128/fid_fake_B ./results///HSI2png_SE_Res12_ngf128/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG_16bit(3) 300 to 128 resnet_12blocks
+python train.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_Res12_ngf128 --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_12blocks --preprocess crop --crop_size 256 --ngf 128 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0 --use_wandb
+python test_metrics.py --dataroot ./datasets/cyclegan_dataset_HSI2png16bit --name HSI2png_Res12_ngf128 --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_12blocks --ngf 128 --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results///HSI2png_Res12_ngf128/fid_fake_B ./results///HSI2png_Res12_ngf128/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+
+
+
