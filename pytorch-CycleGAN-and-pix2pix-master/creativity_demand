@@ -5,6 +5,22 @@ python -m pytorch_fid ./results/HSI2png_16bit_ngf256_supervised_sup/fid_fake_B .
 
 python validate_training.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_ngf256_supervised_sup --model hs_cycle_gan --dataset_mode hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --ngf 256 --preprocess crop --crop_size 256 --num_test 200
 
+HSI(300) to PNG_16bit(3) 300 to 128 resnet_9blocks
 python train.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_ngf128_supervised_sup --model hs_cycle_gan --dataset_mode paired_hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --ngf 128 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0.2  --no_flip --n_epochs 100 --n_epochs_decay 100 --use_wandb
 python test_metrics.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_ngf128_supervised_sup --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --ngf 128 --preprocess none --phase test --input_nc 300 --output_nc 3
 python -m pytorch_fid ./results/HSI2png_16bit_ngf128_supervised_sup/fid_fake_B ./results/HSI2png_16bit_ngf128_supervised_sup/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG_16bit(3) 300 to 128 resnet_9blocks l1+ssim
+python train.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_ngf128_sup_L1_SSIM --model hs_cycle_gan --dataset_mode paired_hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --ngf 128 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0.2 --no_flip --n_epochs 100 --n_epochs_decay 100 --use_wandb --lambda_ssim 1.0
+python test_metrics.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_ngf128_sup_L1_SSIM --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --ngf 128 --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results/HSI2png_16bit_ngf128_sup_L1_SSIM/fid_fake_B ./results/HSI2png_16bit_ngf128_sup_L1_SSIM/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG_16bit(3) 300 to 128 resnet_9blocks l1+vgg
+python train.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_L1_VGG_03 --model hs_cycle_gan --dataset_mode paired_hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --ngf 128 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0.3 --no_flip --n_epochs 100 --n_epochs_decay 100 --use_wandb --lambda_L1_sup 10.0 --lambda_perceptual 0.1 --lambda_ssim 0.0
+python test_metrics.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_L1_VGG_03 --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --ngf 128 --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results/HSI2png_16bit_L1_VGG_03/fid_fake_B ./results/HSI2png_16bit_L1_VGG_03/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1
+
+HSI(300) to PNG_16bit(3) 300 to 128 resnet_9blocks l1+vgg+ssim
+python train.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_L1_VGG_ssim_05 --model hs_cycle_gan --dataset_mode paired_hyperspectral --input_nc 300 --output_nc 3 --netG resnet_9blocks --preprocess crop --crop_size 256 --ngf 128 --num_threads 16 --display_freq 100 --print_freq 100 --save_epoch_freq 5 --lambda_identity 0.5 --no_flip --n_epochs 100 --n_epochs_decay 100 --use_wandb --lambda_L1_sup 5.0 --lambda_perceptual 0.1 --lambda_ssim 1.0
+python test_metrics.py --dataroot ./datasets/HSI_sup --name HSI2png_16bit_L1_VGG_ssim_05 --model hs_cycle_gan --dataset_mode hyperspectral --netG resnet_9blocks --ngf 128 --preprocess none --phase test --input_nc 300 --output_nc 3
+python -m pytorch_fid ./results/HSI2png_16bit_L1_VGG_ssim_05/fid_fake_B ./results/HSI2png_16bit_L1_VGG_ssim_05/fid_real_B --device cuda:0 --num-workers 0 --batch-size 1

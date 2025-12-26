@@ -1,6 +1,6 @@
 import torch
 from models.cycle_gan_model import CycleGANModel
-
+from models.losses import VGGLoss, SSIMLoss
 
 class HsCycleGANModel(CycleGANModel):
     """
@@ -15,9 +15,26 @@ class HsCycleGANModel(CycleGANModel):
         if self.isTrain:
             self.visual_names.append('real_B_raw')
 
+            # === 【新增：将新 Loss 添加到监控列表】 ===
+            if opt.lambda_perceptual > 0:
+                self.loss_names.append('idt_A_VGG')
+            if opt.lambda_ssim > 0:
+                self.loss_names.append('idt_A_SSIM')
+
         # 2. 移除 idt_B (无法计算，避免报错)
         if 'idt_B' in self.visual_names:
             self.visual_names.remove('idt_B')
+
+        # === 【新增：根据参数初始化 Loss 模块】 ===
+        if self.isTrain:
+            # 只有当权重 > 0 时才加载网络，节省显存
+            if opt.lambda_perceptual > 0:
+                self.criterionVGG = VGGLoss().to(self.device)
+                print(f"✅ Enabled Perceptual Loss (weight={opt.lambda_perceptual})")
+
+            if opt.lambda_ssim > 0:
+                self.criterionSSIM = SSIMLoss().to(self.device)
+                print(f"✅ Enabled SSIM Loss (weight={opt.lambda_ssim})")
 
     def set_input(self, input):
         """继承父类方法，并额外获取 B_raw"""
@@ -35,17 +52,35 @@ class HsCycleGANModel(CycleGANModel):
         lambda_B = self.opt.lambda_B
 
         # --- Identity Loss 计算 ---
+        # === 【修改开始：复合监督 Identity Loss】 ===
         if lambda_idt > 0:
-            # 【G_A 的 Identity Loss】: B_raw (300) -> G_A -> B_rgb (3)
+            # G_A 的监督路径: B_raw (300) -> G_A -> B_rgb (3)
             if self.real_B_raw is not None:
                 self.idt_A = self.netG_A(self.real_B_raw)
-                self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
+
+                # 1. 基础 L1 Loss (始终计算)
+                loss_l1 = self.criterionIdt(self.idt_A, self.real_B) * self.opt.lambda_L1_sup
+
+                # 2. Perceptual Loss (VGG)
+                loss_vgg = 0
+                if self.opt.lambda_perceptual > 0:
+                    loss_vgg = self.criterionVGG(self.idt_A, self.real_B) * self.opt.lambda_perceptual
+                    self.loss_idt_A_VGG = loss_vgg  # 记录用于显示
+
+                # 3. SSIM Loss
+                loss_ssim = 0
+                if self.opt.lambda_ssim > 0:
+                    loss_ssim = self.criterionSSIM(self.idt_A, self.real_B) * self.opt.lambda_ssim
+                    self.loss_idt_A_SSIM = loss_ssim  # 记录用于显示
+
+                # 总 Loss: 三者之和，再乘以 lambda_idt
+                # 这样设计是为了保持和 CycleGAN 原有参数量级的兼容性
+                self.loss_idt_A = (loss_l1 + loss_vgg + loss_ssim) * lambda_idt
             else:
                 self.loss_idt_A = 0
-                # 给一个占位符，防止可视化时找不到变量
                 self.idt_A = self.fake_B
 
-                # 【G_B 的 Identity Loss】: 无法计算，置0
+            # G_B 的 Identity Loss 无法计算，保持为 0
             self.loss_idt_B = 0
         else:
             self.loss_idt_A = 0
