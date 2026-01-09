@@ -107,3 +107,60 @@ class SSIMLoss(nn.Module):
             self.channel = channel
 
         return 1 - self._ssim(img1, img2, window, self.window_size, channel, self.size_average)
+
+class FrequencyLoss(nn.Module):
+    """
+    Frequency Domain Loss (频域损失):
+    计算图像在频域(FFT)幅度的 L1 距离。
+    相比 SSIM，它能更直接地优化图像的锐度和纹理细节。
+    """
+    def __init__(self):
+        super(FrequencyLoss, self).__init__()
+
+    def forward(self, pred, target):
+        # pred, target: (B, C, H, W)
+        # 1. 计算 2D FFT (Real-to-Complex)
+        # norm='ortho' 保证能量守恒，数值更稳定
+        pred_freq = torch.fft.rfft2(pred, norm='ortho')
+        target_freq = torch.fft.rfft2(target, norm='ortho')
+
+        # 2. 计算幅度谱 (Amplitude/Magnitude)
+        pred_amp = torch.abs(pred_freq)
+        target_amp = torch.abs(target_freq)
+
+        # 3. 计算幅度谱的 L1 Loss
+        # 这会迫使生成器匹配真值的高频分布
+        loss = F.l1_loss(pred_amp, target_amp)
+        return loss
+
+
+# models/losses.py 末尾追加
+
+class ColorConsistencyLoss(nn.Module):
+    """
+    Color Consistency Loss (颜色一致性损失):
+    通过约束 RGB 通道的均值 (Mean) 和标准差 (Std) 来强制风格对齐。
+    Mean -> 决定整体色调 (如是否偏紫)
+    Std  -> 决定对比度和纹理丰富度 (如细胞核是否够深)
+    """
+
+    def __init__(self):
+        super(ColorConsistencyLoss, self).__init__()
+        self.l1 = nn.L1Loss()
+
+    def forward(self, pred, target):
+        # pred, target: (B, C, H, W)
+
+        # 1. 计算每个通道的均值 (Mean) - 形状 (B, C)
+        pred_mean = torch.mean(pred, dim=[2, 3])
+        target_mean = torch.mean(target, dim=[2, 3])
+
+        # 2. 计算每个通道的标准差 (Std) - 形状 (B, C)
+        pred_std = torch.std(pred, dim=[2, 3])
+        target_std = torch.std(target, dim=[2, 3])
+
+        # 3. Loss = 均值误差 + 标准差误差
+        loss_mean = self.l1(pred_mean, target_mean)
+        loss_std = self.l1(pred_std, target_std)
+
+        return loss_mean + loss_std

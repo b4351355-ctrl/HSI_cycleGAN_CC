@@ -33,6 +33,8 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--lambda_L1_sup', type=float, default=1.0, help='weight for L1 loss in supervised branch')
         parser.add_argument('--lambda_perceptual', type=float, default=0.0,help='weight for perceptual loss (VGG). Set > 0 to enable.')
         parser.add_argument('--lambda_ssim', type=float, default=0.0, help='weight for SSIM loss. Set > 0 to enable.')
+        parser.add_argument('--lambda_freq', type=float, default=0.0,help='weight for Frequency loss. Set > 0 to enable.')
+        parser.add_argument('--lambda_color', type=float, default=0.0,help='weight for Color Consistency loss. Set > 0 to enable.')
 
         self.isTrain = True
         return parser

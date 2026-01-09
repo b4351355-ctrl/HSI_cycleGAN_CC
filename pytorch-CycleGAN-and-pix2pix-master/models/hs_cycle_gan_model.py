@@ -1,6 +1,6 @@
 import torch
 from models.cycle_gan_model import CycleGANModel
-from models.losses import VGGLoss, SSIMLoss
+from models.losses import VGGLoss, SSIMLoss, FrequencyLoss,ColorConsistencyLoss
 
 class HsCycleGANModel(CycleGANModel):
     """
@@ -35,6 +35,16 @@ class HsCycleGANModel(CycleGANModel):
             if opt.lambda_ssim > 0:
                 self.criterionSSIM = SSIMLoss().to(self.device)
                 print(f"✅ Enabled SSIM Loss (weight={opt.lambda_ssim})")
+
+            if opt.lambda_freq > 0:
+                self.criterionFreq = FrequencyLoss().to(self.device)
+                self.loss_names.append('idt_A_Freq')  # 添加到 WandB 监控列表
+                print(f"✅ Enabled Frequency Loss (weight={opt.lambda_freq})")
+
+            if opt.lambda_color > 0:
+                self.criterionColor = ColorConsistencyLoss().to(self.device)
+                self.loss_names.append('idt_A_Color')
+                print(f"✅ Enabled Color Consistency Loss (weight={opt.lambda_color})")
 
     def set_input(self, input):
         """继承父类方法，并额外获取 B_raw"""
@@ -73,9 +83,26 @@ class HsCycleGANModel(CycleGANModel):
                     loss_ssim = self.criterionSSIM(self.idt_A, self.real_B) * self.opt.lambda_ssim
                     self.loss_idt_A_SSIM = loss_ssim  # 记录用于显示
 
+                # 4. freq Loss
+                loss_freq = 0
+                if self.opt.lambda_freq > 0:
+                    # 计算频域损失
+                    loss_freq = self.criterionFreq(self.idt_A, self.real_B) * self.opt.lambda_freq
+                    self.loss_idt_A_Freq = loss_freq  # 记录用于显示
+
+                # 5. Color Consistency Loss (新增)
+                loss_color = 0
+                if self.opt.lambda_color > 0:
+                    loss_color = self.criterionColor(self.idt_A, self.real_B) * self.opt.lambda_color
+                    self.loss_idt_A_Color = loss_color
+
+                    # === 总 Loss 更新 ===
+                    # 将 loss_color 加入
+                    self.loss_idt_A = (loss_l1 + loss_vgg + loss_ssim + loss_freq + loss_color) * lambda_idt
+
                 # 总 Loss: 三者之和，再乘以 lambda_idt
                 # 这样设计是为了保持和 CycleGAN 原有参数量级的兼容性
-                self.loss_idt_A = (loss_l1 + loss_vgg + loss_ssim) * lambda_idt
+                self.loss_idt_A = (loss_l1 + loss_vgg + loss_ssim + loss_freq) * lambda_idt
             else:
                 self.loss_idt_A = 0
                 self.idt_A = self.fake_B
