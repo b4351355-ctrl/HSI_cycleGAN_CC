@@ -162,6 +162,14 @@ def define_G(input_nc, output_nc, ngf, netG, norm="batch", use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == "unet_256":
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    # === 【新增：双流交互网络】 ===
+    elif netG == 'dual_stream':
+        # 默认使用 9 个双流块，这相当于 9 个空间块 + 9 个光谱块并行，深度足够
+        net = DualStreamGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+    # === 【新增：在这里添加 StarNet 选项】 ===
+    elif netG == 'hsi_starnet':
+        net = HSIStarGenerator(input_nc, output_nc, ngf, n_blocks=9, norm_layer=norm_layer, use_dropout=use_dropout)
+    # ======================================
     else:
         raise NotImplementedError("Generator model name [%s] is not recognized" % netG)
     return net
@@ -205,6 +213,11 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm="batch", init_type="normal"
         net = NLayerDiscriminator(input_nc, ndf, n_layers_D, norm_layer=norm_layer)
     elif netD == "pixel":  # classify if each pixel is real or fake
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer)
+    # === 【新增：注册 Multiscale Discriminator】 ===
+    elif netD == 'multiscale':
+        # 默认使用 3 个尺度，每个尺度内部是标准的 3 层 PatchGAN
+        net = MultiscaleDiscriminator(input_nc, ndf, n_layers=n_layers_D, norm_layer=norm_layer, num_D=3)
+    # ============================================
     else:
         raise NotImplementedError("Discriminator model name [%s] is not recognized" % netD)
     return net
@@ -262,15 +275,36 @@ class GANLoss(nn.Module):
         return target_tensor.expand_as(prediction)
 
     def __call__(self, prediction, target_is_real):
-        """Calculate loss given Discriminator's output and grount truth labels.
+        """Calculate loss given Discriminator's output and grount truth labels."""
 
-        Parameters:
-            prediction (tensor) - - tpyically the prediction output from a discriminator
-            target_is_real (bool) - - if the ground truth label is for real images or fake images
+        # === 【修改核心：多尺度加权求和】 ===
+        if isinstance(prediction, list):
+            loss = 0
 
-        Returns:
-            the calculated loss.
-        """
+            # ------------------------------------------------------------------
+            # 【权重配置区】 根据虚拟染色任务定制
+            # 列表顺序对应 MultiscaleDiscriminator 输出：[原图, 1/2图, 1/4图 ...]
+            # 方案 A (推荐): 强调细节。让网络死磕细胞纹理，依靠粗尺度维持基本结构。
+            scale_weights = [1.0, 0.8, 0.4]
+
+            # 方案 B (保守): 均衡模式。如果发现生成的细胞结构扭曲，可以用这个。
+            # scale_weights = [1.0, 1.0, 1.0]
+
+            for i, pred in enumerate(prediction):
+                # 安全获取权重 (防止鉴别器层数变了但权重列表没改)
+                weight = scale_weights[i] if i < len(scale_weights) else 1.0
+
+                # 计算当前尺度的 Loss
+                target_tensor = self.get_target_tensor(pred, target_is_real)
+                term_loss = self.loss(pred, target_tensor)
+
+                # 加权累加
+                loss += term_loss * weight
+
+            return loss
+        # ===================================
+
+        # 单尺度逻辑
         if self.gan_mode in ["lsgan", "vanilla"]:
             target_tensor = self.get_target_tensor(prediction, target_is_real)
             loss = self.loss(prediction, target_tensor)
@@ -428,6 +462,267 @@ class ResnetBlock(nn.Module):
         return out
 
 
+##############################################################################
+# StarNet (CVPR 2024) Lightweight Modules
+##############################################################################
+
+class StarBlock(nn.Module):
+    """
+    StarNet Block (CVPR 2024)
+    核心原理: 利用 f(x) * g(x) 的元素级乘法在低维空间模拟高维非线性特征。
+    """
+
+    def __init__(self, dim, mlp_ratio=3, drop_path=0.):
+        super().__init__()
+        # 1. 深度卷积 (Depthwise Conv): 提取空间特征，groups=dim 表示每个通道独立卷积，参数量极少
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim, bias=False)
+
+        # 2. 两个 1x1 卷积分支实现 F(x) * G(x)
+        mid_dim = int(dim * mlp_ratio)
+        self.f1 = nn.Conv2d(dim, mid_dim, 1, bias=False)
+        self.f2 = nn.Conv2d(dim, mid_dim, 1, bias=False)
+
+        # 3. 输出映射
+        self.g = nn.Conv2d(mid_dim, dim, 1, bias=False)
+
+        # 4. Normalization & Activation
+        self.norm = nn.BatchNorm2d(dim)
+        self.act = nn.ReLU6(inplace=True)
+
+        # 这里的 DropPath 使用 Identity 占位，避免引入 timm 库依赖，保持极简
+        self.drop_path = nn.Identity()
+
+    def forward(self, x):
+        input = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+
+        # --- Star Operation ---
+        # 核心：两个分支相乘
+        x1 = self.f1(x)
+        x2 = self.f2(x)
+        x = self.act(x1) * x2
+        # ----------------------
+
+        x = self.g(x)
+        x = self.drop_path(x)
+        return input + x
+
+
+class HSIStarGenerator(nn.Module):
+    """
+    基于 StarNet 的高光谱轻量化生成器
+    结构: [1x1 压缩] -> [下采样] -> [StarBlocks] -> [上采样] -> [输出]
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, n_blocks=9, norm_layer=nn.BatchNorm2d, use_dropout=False,
+                 padding_type='reflect'):
+        super(HSIStarGenerator, self).__init__()
+
+        # 处理 norm_layer 可能是 partial 函数的情况
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = []
+
+        # === 1. HSI 特征压缩头 (关键步骤) ===
+        # 将 300 通道先用 1x1 卷积压缩到 64 通道 (ngf)
+        # 这一步直接砍掉了 90% 以上的计算量
+        if input_nc > ngf:
+            model += [nn.Conv2d(input_nc, ngf, kernel_size=1, stride=1, padding=0, bias=use_bias),
+                      norm_layer(ngf),
+                      nn.ReLU(True)]
+        else:
+            # 兼容 RGB 输入的情况
+            model += [nn.ReflectionPad2d(3),
+                      nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                      norm_layer(ngf),
+                      nn.ReLU(True)]
+
+        # === 2. 下采样 (Downsampling) ===
+        # 64 -> 128 -> 256
+        n_downsampling = 2
+        curr_dim = ngf
+        for i in range(n_downsampling):
+            model += [nn.Conv2d(curr_dim, curr_dim * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(curr_dim * 2),
+                      nn.ReLU(True)]
+            curr_dim *= 2
+
+        # === 3. 核心：StarNet Blocks (替换笨重的 ResNet Blocks) ===
+        # 这里的 curr_dim 通常是 256 (如果 ngf=64)
+        for i in range(n_blocks):
+            model += [StarBlock(curr_dim, mlp_ratio=3)]
+
+        # === 4. 上采样 (Upsampling) ===
+        for i in range(n_downsampling):
+            model += [nn.ConvTranspose2d(curr_dim, curr_dim // 2,
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(curr_dim // 2),
+                      nn.ReLU(True)]
+            curr_dim //= 2
+
+        # === 5. 输出层 ===
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input):
+        return self.model(input)
+
+
+class DualStreamBlock(nn.Module):
+    """
+    【用户定制版】双流交互残差块 (Post-Residual Attention)
+
+    架构逻辑:
+    1. Spatial & Spectral Branch: 并行提取特征
+    2. Fusion: 拼接 + 降维
+    3. Residual Add: 先将新特征与输入特征相加 (Input + Fused)
+    4. SE Attention: 对相加后的完整特征图进行注意力加权 (Recalibrate the Whole)
+    """
+
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        super(DualStreamBlock, self).__init__()
+
+        # ==========================================
+        # 1. 空间分支 (Spatial Branch)
+        # ==========================================
+        spatial_build = []
+        p = 0
+        if padding_type == 'reflect':
+            spatial_build += [nn.ReflectionPad2d(1)]
+        elif padding_type == 'replicate':
+            spatial_build += [nn.ReplicationPad2d(1)]
+        elif padding_type == 'zero':
+            p = 1
+        else:
+            raise NotImplementedError('padding [%s] is not implemented' % padding_type)
+
+        spatial_build += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias),
+                          norm_layer(dim),
+                          nn.ReLU(True)]
+        if use_dropout:
+            spatial_build += [nn.Dropout(0.5)]
+
+        p = 0
+        if padding_type == 'reflect':
+            spatial_build += [nn.ReflectionPad2d(1)]
+        elif padding_type == 'replicate':
+            spatial_build += [nn.ReplicationPad2d(1)]
+        elif padding_type == 'zero':
+            p = 1
+
+        spatial_build += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias),
+                          norm_layer(dim)]
+        self.spatial_path = nn.Sequential(*spatial_build)
+
+        # ==========================================
+        # 2. 光谱分支 (Spectral Branch)
+        # ==========================================
+        self.spectral_path = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1, stride=1, padding=0, bias=use_bias),
+            norm_layer(dim),
+            nn.ReLU(True),
+            nn.Conv2d(dim, dim, kernel_size=1, stride=1, padding=0, bias=use_bias),
+            norm_layer(dim)
+        )
+
+        # ==========================================
+        # 3. 融合卷积 (Fusion Conv)
+        # ==========================================
+        # 只负责拼接后的降维，不再包含 SE，SE 移到最后
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1, stride=1, padding=0, bias=use_bias),
+            norm_layer(dim)
+        )
+
+        # ==========================================
+        # 4. 后置注意力 (Post-Attention)
+        # ==========================================
+        self.se = SELayer(dim)
+
+    def forward(self, x):
+        # 1. 并行提取
+        x_spatial = self.spatial_path(x)
+        x_spectral = self.spectral_path(x)
+
+        # 2. 拼接与融合
+        x_cat = torch.cat([x_spatial, x_spectral], dim=1)
+        x_fused = self.fusion_conv(x_cat)
+
+        # 3. 【修改点】先做残差连接
+        # 此时 x_out 包含了原始信息(x)和双流处理后的新信息(x_fused)
+        x_out = x + x_fused
+
+        # 4. 【修改点】最后做 SE 注意力加权
+        # 让网络判断：在保留了原始信息和加入了新特征后，哪些通道才是传递给下一层的关键？
+        out = self.se(x_out)
+
+        return out
+
+class DualStreamGenerator(nn.Module):
+    """
+    基于双流交互块的生成器
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=9,
+                 padding_type='reflect'):
+        super(DualStreamGenerator, self).__init__()
+        assert (n_blocks >= 0)
+
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        # === 1. 初始卷积层 ===
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        # === 2. 下采样 (Downsampling) ===
+        n_downsampling = 2
+        for i in range(n_downsampling):
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        # === 3. 核心部分：双流交互残差块 (Dual-Stream Bottleneck) ===
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):
+            model += [
+                DualStreamBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
+                                use_bias=use_bias)]
+
+        # === 4. 上采样 (Upsampling) ===
+        for i in range(n_downsampling):
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+
+        # === 5. 输出层 ===
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input):
+        return self.model(input)
+
 class UnetGenerator(nn.Module):
     """Create a Unet-based generator"""
 
@@ -562,6 +857,48 @@ class NLayerDiscriminator(nn.Module):
         return self.model(input)
 
 
+class MultiscaleDiscriminator(nn.Module):
+    """
+    多尺度鉴别器架构 (Multiscale Discriminator)
+    默认包含 3 个不同尺度的 PatchGAN 鉴别器
+    """
+
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, num_D=3):
+        """
+        Parameters:
+            input_nc (int)  -- 输入通道数
+            ndf (int)       -- 基础卷积核数量
+            n_layers (int)  -- 每个鉴别器的层数
+            norm_layer      -- 归一化层
+            num_D (int)     -- 鉴别器的数量 (尺度数量)，默认 3
+        """
+        super(MultiscaleDiscriminator, self).__init__()
+        self.num_D = num_D
+        self.n_layers = n_layers
+
+        for i in range(num_D):
+            # 创建 num_D 个独立的鉴别器
+            netD = NLayerDiscriminator(input_nc, ndf, n_layers, norm_layer)
+            # 使用 add_module 注册子网络，方便后续管理参数和 GPU 迁移
+            self.add_module('discriminator_%d' % i, netD)
+
+        # 定义下采样操作 (AvgPool)，每次分辨率减半
+        self.downsample = nn.AvgPool2d(3, stride=2, padding=[1, 1], count_include_pad=False)
+
+    def forward(self, input):
+        result = []
+        downsampled_input = input
+        for i in range(self.num_D):
+            # 依次调用 discriminator_0, discriminator_1, ...
+            model = getattr(self, 'discriminator_%d' % i)
+            result.append(model(downsampled_input))
+
+            # 准备下一层的输入 (除了最后一层外，都做下采样)
+            if i != self.num_D - 1:
+                downsampled_input = self.downsample(downsampled_input)
+
+        return result
+
 class PixelDiscriminator(nn.Module):
     """Defines a 1x1 PatchGAN discriminator (pixelGAN)"""
 
@@ -598,22 +935,30 @@ class PixelDiscriminator(nn.Module):
 
 
 # --- 1. 定义 SE (Squeeze-and-Excitation) 模块 ---
-# 作用：让网络自动学习高光谱中哪些波段是重要的
 class SELayer(nn.Module):
     def __init__(self, channel, reduction=16):
         super(SELayer, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        # --- 优化点 1: 动态计算中间层维度，防止除以 16 后过小 ---
+        # 保证中间层至少有 4 个通道，或者您可以根据需要设为 1
+        reduced_channel = max(channel // reduction, 4)
+
         self.fc = nn.Sequential(
-            nn.Linear(channel, channel // reduction, bias=False),
+            # --- 优化点 2: 启用 bias (默认即为 True)，增强拟合能力 ---
+            nn.Linear(channel, reduced_channel, bias=True),
             nn.ReLU(inplace=True),
-            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Linear(reduced_channel, channel, bias=True),
             nn.Sigmoid()
         )
 
     def forward(self, x):
         b, c, _, _ = x.size()
+        # Squeeze: 全局平均池化
         y = self.avg_pool(x).view(b, c)
+        # Excitation: 全连接层学习权重
         y = self.fc(y).view(b, c, 1, 1)
+        # Scale: 将权重作用回原特征
         return x * y.expand_as(x)
 
 # --- 2. 定义带 SE 的残差块 ---
