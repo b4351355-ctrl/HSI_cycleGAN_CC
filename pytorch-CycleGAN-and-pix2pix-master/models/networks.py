@@ -577,23 +577,17 @@ class HSIStarGenerator(nn.Module):
         return self.model(input)
 
 
+# ===替换 DualStreamBlock 为后置注意力版】 ===
 class DualStreamBlock(nn.Module):
     """
-    【用户定制版】双流交互残差块 (Post-Residual Attention)
-
-    架构逻辑:
-    1. Spatial & Spectral Branch: 并行提取特征
-    2. Fusion: 拼接 + 降维
-    3. Residual Add: 先将新特征与输入特征相加 (Input + Fused)
-    4. SE Attention: 对相加后的完整特征图进行注意力加权 (Recalibrate the Whole)
+    【定制版】双流交互残差块 (Post-Residual Attention)
+    逻辑: Output = SE( Input + Fusion(Streams) )
     """
 
     def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
         super(DualStreamBlock, self).__init__()
 
-        # ==========================================
         # 1. 空间分支 (Spatial Branch)
-        # ==========================================
         spatial_build = []
         p = 0
         if padding_type == 'reflect':
@@ -623,9 +617,7 @@ class DualStreamBlock(nn.Module):
                           norm_layer(dim)]
         self.spatial_path = nn.Sequential(*spatial_build)
 
-        # ==========================================
         # 2. 光谱分支 (Spectral Branch)
-        # ==========================================
         self.spectral_path = nn.Sequential(
             nn.Conv2d(dim, dim, kernel_size=1, stride=1, padding=0, bias=use_bias),
             norm_layer(dim),
@@ -634,76 +626,89 @@ class DualStreamBlock(nn.Module):
             norm_layer(dim)
         )
 
-        # ==========================================
         # 3. 融合卷积 (Fusion Conv)
-        # ==========================================
-        # 只负责拼接后的降维，不再包含 SE，SE 移到最后
         self.fusion_conv = nn.Sequential(
             nn.Conv2d(dim * 2, dim, kernel_size=1, stride=1, padding=0, bias=use_bias),
             norm_layer(dim)
         )
 
-        # ==========================================
         # 4. 后置注意力 (Post-Attention)
-        # ==========================================
         self.se = SELayer(dim)
 
     def forward(self, x):
-        # 1. 并行提取
+        # 并行提取
         x_spatial = self.spatial_path(x)
         x_spectral = self.spectral_path(x)
 
-        # 2. 拼接与融合
+        # 拼接与融合
         x_cat = torch.cat([x_spatial, x_spectral], dim=1)
         x_fused = self.fusion_conv(x_cat)
 
-        # 3. 【修改点】先做残差连接
-        # 此时 x_out 包含了原始信息(x)和双流处理后的新信息(x_fused)
+        # 【关键修改】先做残差连接
         x_out = x + x_fused
 
-        # 4. 【修改点】最后做 SE 注意力加权
-        # 让网络判断：在保留了原始信息和加入了新特征后，哪些通道才是传递给下一层的关键？
+        # 【关键修改】最后做 SE 全局校准
         out = self.se(x_out)
-
         return out
 
 class DualStreamGenerator(nn.Module):
     """
-    基于双流交互块的生成器
+    【最终定制版】双流生成器
+    结构：[1x1 光谱嵌入] -> [3x3 特征过渡] -> [标准下采样] -> [后置注意力双流 Block] -> [上采样]
     """
 
     def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=9,
                  padding_type='reflect'):
         super(DualStreamGenerator, self).__init__()
-        assert (n_blocks >= 0)
 
         if type(norm_layer) == functools.partial:
             use_bias = norm_layer.func == nn.InstanceNorm2d
         else:
             use_bias = norm_layer == nn.InstanceNorm2d
 
-        # === 1. 初始卷积层 ===
-        model = [nn.ReflectionPad2d(3),
-                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
-                 norm_layer(ngf),
-                 nn.ReLU(True)]
+        model = []
 
-        # === 2. 下采样 (Downsampling) ===
+        # ============================================================
+        # 1. 光谱嵌入层 (Spectral Embedding Stem)
+        # 替代了传统的 7x7 卷积。直接将 300 维映射到 ngf (128)
+        # ============================================================
+        stem_dim = ngf  # 保持 ngf (128)
+
+        # A: 1x1 Conv 提纯光谱 (300 -> 128)
+        model += [
+            nn.Conv2d(input_nc, stem_dim, kernel_size=1, stride=1, padding=0, bias=use_bias),
+            norm_layer(stem_dim),
+            nn.ReLU(True)
+        ]
+
+        # B: 3x3 Conv 特征过渡 (128 -> 128)
+        # 为后续的标准卷积做铺垫，开始引入空间上下文
+        model += [
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(stem_dim, ngf, kernel_size=3, stride=1, padding=0, bias=use_bias),
+            norm_layer(ngf),
+            nn.ReLU(True)
+        ]
+
+        # 2. 标准下采样 (Standard Downsampling)
         n_downsampling = 2
         for i in range(n_downsampling):
             mult = 2 ** i
-            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
-                      norm_layer(ngf * mult * 2),
-                      nn.ReLU(True)]
+            model += [
+                nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                norm_layer(ngf * mult * 2),
+                nn.ReLU(True)
+            ]
 
-        # === 3. 核心部分：双流交互残差块 (Dual-Stream Bottleneck) ===
+        # 3. 核心瓶颈层 (Bottleneck)
+        # 使用上面的 Post-Residual DualStreamBlock
         mult = 2 ** n_downsampling
         for i in range(n_blocks):
             model += [
                 DualStreamBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
                                 use_bias=use_bias)]
 
-        # === 4. 上采样 (Upsampling) ===
+        # 4. 解码器 (Decoder) - 保持标准结构
         for i in range(n_downsampling):
             mult = 2 ** (n_downsampling - i)
             model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
@@ -713,7 +718,7 @@ class DualStreamGenerator(nn.Module):
                       norm_layer(int(ngf * mult / 2)),
                       nn.ReLU(True)]
 
-        # === 5. 输出层 ===
+        # 5. 输出层
         model += [nn.ReflectionPad2d(3)]
         model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
         model += [nn.Tanh()]
