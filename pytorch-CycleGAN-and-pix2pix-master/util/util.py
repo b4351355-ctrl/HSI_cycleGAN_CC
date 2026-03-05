@@ -24,6 +24,10 @@ def tensor2im(input_image, imtype=np.uint8):
         image_numpy = image_tensor[0].cpu().float().numpy()  # convert it into a numpy array
         if image_numpy.shape[0] == 1:  # grayscale to RGB
             image_numpy = np.tile(image_numpy, (3, 1, 1))
+        elif image_numpy.shape[0] > 3: # ===== 新增高光谱补丁 =====
+            # 如果通道数大于3（比如300），强行只取前3个通道用于网页可视化，避免报错
+            image_numpy = image_numpy[:3, :, :]
+        # ============================================
         image_numpy = (np.transpose(image_numpy, (1, 2, 0)) + 1) / 2.0 * 255.0  # post-processing: tranpose and scaling
     else:  # if it is a numpy array, do nothing
         image_numpy = input_image
@@ -128,3 +132,16 @@ def mkdir(path):
         path (str) -- a single directory path
     """
     Path(path).mkdir(parents=True, exist_ok=True)
+
+import argparse
+
+def str2bool(v):
+    """Convert string to boolean"""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')

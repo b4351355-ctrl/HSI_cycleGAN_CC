@@ -11,6 +11,9 @@ from data import create_dataset
 from models import create_model
 from util import util
 
+import cv2
+from skimage.color import rgb2hed
+from skimage.exposure import rescale_intensity
 
 def tensor2im_3ch(input_image):
     """
@@ -46,6 +49,45 @@ def get_rgb_gray(rgb_numpy_uint8):
     gray = (gray * 255.0).astype(np.uint8)
     return gray
 
+
+def get_he_channels_rgb(rgb_image):
+    """
+    分离 H&E 通道并将其转换为可视化的 RGB 图像
+    :param rgb_image: uint8 numpy array (H, W, 3) RGB格式
+    :return: h_img_rgb, e_img_rgb (皆为 uint8 H,W,3)
+    """
+    img_float = rgb_image.astype(np.float64) / 255.0
+    hed = rgb2hed(img_float)
+
+    # 提取 H 通道 (Hematoxylin - 蓝紫色)
+    h_only = np.zeros_like(hed)
+    h_only[:, :, 0] = hed[:, :, 0]
+
+    # 提取 E 通道 (Eosin - 粉红色)
+    e_only = np.zeros_like(hed)
+    e_only[:, :, 1] = hed[:, :, 1]
+
+    from skimage.color import hed2rgb
+    h_img_rgb = hed2rgb(h_only)
+    e_img_rgb = hed2rgb(e_only)
+
+    h_img_rgb = rescale_intensity(h_img_rgb, out_range=(0, 255)).astype(np.uint8)
+    e_img_rgb = rescale_intensity(e_img_rgb, out_range=(0, 255)).astype(np.uint8)
+
+    return h_img_rgb, e_img_rgb
+
+
+def generate_error_heatmap(real_rgb, fake_rgb):
+    """生成绝对误差热力图"""
+    diff = np.abs(real_rgb.astype(np.float32) - fake_rgb.astype(np.float32))
+    diff_gray = np.mean(diff, axis=2)
+    # 放大误差以便肉眼更容易观察到微小伪影
+    diff_gray = np.clip(diff_gray * 2.0, 0, 255).astype(np.uint8)
+
+    heatmap = cv2.applyColorMap(diff_gray, cv2.COLORMAP_JET)
+    heatmap_rgb = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+    return heatmap_rgb
 
 if __name__ == '__main__':
     opt = TestOptions().parse()
@@ -146,6 +188,24 @@ if __name__ == '__main__':
         img_real_B = tensor2im_3ch(real_B)
         save_path_b = os.path.join(real_b_dir, f"real_B_{i:04d}.png")
         util.save_image(img_real_B, save_path_b)
+
+        # ------------------ 新增：分离 H&E 和生成热力图 ------------------
+        # 对生成的伪 RGB 图像进行 H&E 分离，并复用 util.save_image
+        h_fake, e_fake = get_he_channels_rgb(img_fake_B)
+        util.save_image(h_fake, os.path.join(fake_b_dir, f"fake_B_{i:04d}_H.png"))
+        util.save_image(e_fake, os.path.join(fake_b_dir, f"fake_B_{i:04d}_E.png"))
+
+        # 如果真实目标图的大小与生成图一致（防爆错），计算热力图与真实的 H&E
+        if img_fake_B.shape == img_real_B.shape:
+            # 真实图分离通道
+            h_real, e_real = get_he_channels_rgb(img_real_B)
+            util.save_image(h_real, os.path.join(real_b_dir, f"real_B_{i:04d}_H.png"))
+            util.save_image(e_real, os.path.join(real_b_dir, f"real_B_{i:04d}_E.png"))
+
+            # 生成病理伪影误差热力图，将其存放在 fake_B 目录下
+            heatmap_rgb = generate_error_heatmap(img_real_B, img_fake_B)
+            util.save_image(heatmap_rgb, os.path.join(fake_b_dir, f"fake_B_{i:04d}_heatmap.png"))
+        # ----------------------------------------------------------------
 
     # ================= 循环结束，统一输出 =================
 
